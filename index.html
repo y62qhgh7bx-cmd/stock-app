@@ -347,20 +347,19 @@ async function fetchPrices(){
     const r=await fetch('https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json',{signal:AbortSignal.timeout(12000)});
     const d=await r.json();
     if(d.data){
-      // 欄位: [代號, 名稱, 成交股數, 成交金額, 開盤, 最高, 最低, 收盤, 漲跌(+/-), 漲跌價差, ...]
       for(const row of d.data){
         const sym=row[0].trim();
         if(!syms.includes(sym))continue;
-        const close=parseFloat(row[7].replace(/,/g,''));
-        const sign=row[8].trim();
-        const diff=parseFloat(row[9].replace(/,/g,''))||0;
-        const change=sign==='-'?-diff:diff;
+        const close=parseFloat((row[7]||'').replace(/,/g,''));
+        if(isNaN(close)||close<=0)continue;
+        const sign=(row[8]||'').trim();
+        const diffRaw=(row[9]||'').replace(/,/g,'').replace(/[^0-9.]/g,'');
+        const diff=parseFloat(diffRaw)||0;
+        const change=sign==='-'?-diff:sign==='+'?diff:0;
         const prev=close-change;
-        const pct=prev?(change/prev*100):0;
-        if(close>0){
-          const o={symbol:sym,price:close,change:+change.toFixed(2),pct:+pct.toFixed(2),time:'收盤'};
-          P[sym]=o;await dbPut('prices',{...o,updated:Date.now()});n++;
-        }
+        const pct=(prev>0&&change!==0)?(change/prev*100):0;
+        const o={symbol:sym,price:close,change:+change.toFixed(2),pct:+pct.toFixed(2),time:'收盤'};
+        P[sym]=o;await dbPut('prices',{...o,updated:Date.now()});n++;
       }
     }
   }catch(e){/* 上市API失敗，繼續嘗試上櫃 */}
