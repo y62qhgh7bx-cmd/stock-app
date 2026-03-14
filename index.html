@@ -88,6 +88,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 #toast{position:fixed;bottom:calc(80px + var(--safe-bottom));left:50%;transform:translateX(-50%) translateY(8px);background:var(--bg3);color:var(--text);padding:10px 20px;border-radius:20px;font-size:14px;opacity:0;transition:all .25s;z-index:300;border:.5px solid var(--border);pointer-events:none;}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 .empty{text-align:center;padding:36px 20px;color:var(--text3);font-size:14px;line-height:1.8;}
+.ctab{background:none;border:.5px solid var(--border);color:var(--text3);border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer;transition:all .15s;}
+.ctab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
 </style>
 </head>
 <body>
@@ -239,6 +241,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         <div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:8px;"><span style="color:var(--text3)">交易筆數</span><span id="st-trades">—</span></div>
         <div style="display:flex;justify-content:space-between;font-size:14px;"><span style="color:var(--text3)">資金紀錄</span><span id="st-cf">—</span></div>
       </div>
+      <div class="sec-title" style="margin-top:8px;">到價提醒清單</div>
+      <div class="card" style="padding:0;" id="alert-list-card">
+        <div id="alert-list"><div class="empty" style="padding:20px">尚無設定提醒</div></div>
+      </div>
       <button class="btn-d" onclick="if(confirm('確定清除所有資料？'))clearAll()">清除所有資料</button>
     </div>
     <!-- 個股詳情 -->
@@ -251,6 +257,20 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         <div style="display:flex;align-items:center;justify-content:space-between;">
           <div class="price-big" id="d-price">—</div>
           <div class="p-badge neu" id="d-chg">—</div>
+        </div>
+      </div>
+      <div class="card" style="padding:12px 16px 8px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <div style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;">近期走勢</div>
+          <div style="display:flex;gap:4px;" id="chart-tabs">
+            <button class="ctab active" onclick="loadChart('1M')">1月</button>
+            <button class="ctab" onclick="loadChart('3M')">3月</button>
+            <button class="ctab" onclick="loadChart('6M')">6月</button>
+          </div>
+        </div>
+        <div id="chart-wrap" style="position:relative;height:140px;">
+          <canvas id="price-chart"></canvas>
+          <div id="chart-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--text3);">載入中…</div>
         </div>
       </div>
       <div class="card" style="padding:0 16px;">
@@ -398,6 +418,7 @@ async function fetchPrices(){
   }
   $('refresh-btn').textContent='更新報價 ↻';
   renderHoldings();
+  checkAlerts();
 }
 
 // ── RENDER HOLDINGS ──
@@ -462,7 +483,7 @@ async function renderCashflow(){
 }
 
 // ── DETAIL ──
-let curSym='';
+let curSym=''; let curHolding=null;
 async function showDetail(sym){
   curSym=sym;
   $('navbar-title').textContent=`${sym} ${NAMES[sym]||''}`;
@@ -474,20 +495,36 @@ async function showDetail(sym){
   const trades=await dbAll('trades');
   const all=await calcHoldings(trades);
   const h=all.find(x=>x.symbol===sym);
-  if(h){const mv=p?p.price*h.shares:h.cost;const pnl=mv-h.cost;
-    $('d-stats').innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-      <div><div style="font-size:11px;color:var(--text3);margin-bottom:4px">持股</div><div style="font-size:16px;font-weight:600">${h.shares} 股</div></div>
-      <div><div style="font-size:11px;color:var(--text3);margin-bottom:4px">平均成本</div><div style="font-size:16px;font-weight:600">$${h.avg.toFixed(2)}</div></div>
-      <div><div style="font-size:11px;color:var(--text3);margin-bottom:4px">持倉成本</div><div style="font-size:16px;font-weight:600">$${fmt(h.cost)}</div></div>
-      <div><div style="font-size:11px;color:var(--text3);margin-bottom:4px">未實現損益</div><div style="font-size:16px;font-weight:600;color:${pnl>=0?'var(--green)':'var(--red)'}">${fmtS(pnl)}</div></div>
-      ${h.real?`<div><div style="font-size:11px;color:var(--text3);margin-bottom:4px">已實現損益</div><div style="font-size:16px;font-weight:600;color:${h.real>=0?'var(--green)':'var(--red)'}">${fmtS(h.real)}</div></div>`:''}
+  if(h){
+    const mv=p?p.price*h.shares:h.cost;
+    const pnl=mv-h.cost;
+    const pnlPct=h.cost?(pnl/h.cost*100):0;
+    // 損益平衡價：均成本 × (1 + 手續費率) — 即賣出手續費+稅後剛好回本
+    const breakeven = h.avg * (1 + 0.001425*0.28 + 0.003);
+    // 年化報酬率：找最早買入日
+    const symTrades2=trades.filter(t=>t.symbol===sym&&t.type==='buy');
+    const firstDate=symTrades2.length?symTrades2.sort((a,b)=>a.date.localeCompare(b.date))[0].date:null;
+    let annualPct=null;
+    if(firstDate&&h.cost>0){
+      const days=Math.max(1,(Date.now()-new Date(firstDate).getTime())/(1000*60*60*24));
+      annualPct=((mv/h.cost)**(365/days)-1)*100;
+    }
+    curHolding=h;
+    $('d-stats').innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">持股</div><div style="font-size:15px;font-weight:600">${h.shares} 股</div></div>
+      <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">均成本</div><div style="font-size:15px;font-weight:600">$${h.avg.toFixed(2)}</div></div>
+      <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">持倉成本</div><div style="font-size:15px;font-weight:600">$${fmt(h.cost)}</div></div>
+      <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">損益平衡價</div><div style="font-size:15px;font-weight:600;color:var(--accent2)">$${breakeven.toFixed(2)}</div></div>
+      <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">未實現損益</div><div style="font-size:15px;font-weight:600;color:${pnl>=0?'var(--green)':'var(--red)'}">${fmtS(pnl)} (${fmtP(pnlPct)})</div></div>
+      ${annualPct!==null?`<div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">年化報酬率</div><div style="font-size:15px;font-weight:600;color:${annualPct>=0?'var(--green)':'var(--red)'}">${fmtP(annualPct)}</div></div>`:''}
+      ${h.real?`<div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">已實現損益</div><div style="font-size:15px;font-weight:600;color:${h.real>=0?'var(--green)':'var(--red)'}">${fmtS(h.real)}</div></div>`:''}
     </div>`;}
   const strades=trades.filter(t=>t.symbol===sym).sort((a,b)=>b.date.localeCompare(a.date));
   // 到價提醒設定
-  const alert=await dbGet('alerts',sym)||{};
+  const alertData=await dbGet('alerts',sym).catch(()=>null)||{};
   $('d-alert-sym').textContent=sym;
-  $('d-alert-high').value=alert.high||'';
-  $('d-alert-low').value=alert.low||'';
+  $('d-alert-high').value=alertData.high||'';
+  $('d-alert-low').value=alertData.low||'';
   $('d-trades').innerHTML=strades.map(t=>{
     const a=t.price*t.shares,f=fee(a,t.fee_discount||0.28),tx=t.type==='sell'?taxF(a):0;
     return `<div class="swipe-wrap" id="tw-${t.id}">
@@ -498,6 +535,8 @@ async function showDetail(sym){
       </div></div></div>`;}
   ).join('')||'<div class="empty">無交易紀錄</div>';
   bindSwipe('d-trades');
+  // 載入走勢圖
+  setTimeout(()=>loadChart(chartPeriod),50);
   pushPage('detail');
 }
 
@@ -647,6 +686,235 @@ async function checkAlerts(){
   }catch(e){}
 }
 
+// ── 走勢圖 ──
+let chartInst=null;
+let chartPeriod='1M';
+
+async function loadChart(period){
+  if(!curSym)return;
+  chartPeriod=period;
+  // 更新 tab 樣式
+  document.querySelectorAll('.ctab').forEach(b=>{
+    b.classList.toggle('active',b.textContent===({'1M':'1月','3M':'3月','6M':'6月'})[period]);
+  });
+  const wrap=$('chart-wrap');
+  const loading=$('chart-loading');
+  if(loading)loading.style.display='flex';
+  // 計算日期範圍
+  const end=new Date();
+  const start=new Date();
+  const days={'1M':30,'3M':90,'6M':180}[period]||30;
+  start.setDate(start.getDate()-days);
+  const fmt2=d=>d.toISOString().slice(0,10).replace(/-/g,'/');
+  // 使用 TWSE 歷史資料 API
+  // 上市: /rwd/zh/afterTrading/STOCK_DAY?stockNo=XXXX&date=YYYYMMDD (單月)
+  // 需要分月請求，組合成完整資料
+  loadChartLibs(async()=>{
+  try{
+    const allData=[];
+    const months=[];
+    let cur=new Date(start);
+    cur.setDate(1);
+    while(cur<=end){
+      months.push(cur.toISOString().slice(0,7).replace('-',''));
+      cur.setMonth(cur.getMonth()+1);
+    }
+    for(const ym of months){
+      const url=`https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?stockNo=${curSym}&date=${ym}01&response=json`;
+      try{
+        const r=await fetch(url,{signal:AbortSignal.timeout(6000)});
+        const d=await r.json();
+        if(d.data){
+          for(const row of d.data){
+            // [日期, 成交股數, 成交金額, 開盤, 最高, 最低, 收盤, 漲跌, 成交筆數]
+            const dateStr=row[0].replace(/\//g,'-').replace(/^(\d+)/,m=>String(parseInt(m)+1911));
+            const open=parseFloat(row[3].replace(/,/g,''));
+            const high=parseFloat(row[4].replace(/,/g,''));
+            const low=parseFloat(row[5].replace(/,/g,''));
+            const close=parseFloat(row[6].replace(/,/g,''));
+            if(!isNaN(close)&&close>0) allData.push({date:dateStr,open,high,low,close});
+          }
+        }
+      }catch(e){}
+    }
+    // 過濾日期範圍
+    const startStr=start.toISOString().slice(0,10);
+    const filtered=allData.filter(d=>d.date>=startStr).sort((a,b)=>a.date.localeCompare(b.date));
+    if(loading)loading.style.display='none';
+    if(filtered.length===0){
+      if(loading){loading.textContent='暫無歷史資料';loading.style.display='flex';}
+      return;
+    }
+    drawChart(filtered);
+  }catch(e){
+    console.error(e);
+    if(loading){loading.textContent='載入失敗';loading.style.display='flex';}
+  }
+  }); // end loadChartLibs
+}
+
+function loadChartLibs(cb){
+  if(window._chartLibsReady){cb();return;}
+  const scripts=[
+    'https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js',
+    'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js',
+    'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.js',
+    'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.1.1/dist/chartjs-chart-financial.umd.js'
+  ];
+  let loaded=0;
+  scripts.forEach(src=>{
+    const s=document.createElement('script');
+    s.src=src;
+    s.onload=()=>{if(++loaded===scripts.length){window._chartLibsReady=true;cb();}};
+    document.head.appendChild(s);
+  });
+}
+
+function drawChart(data){
+  const canvas=$('price-chart');
+  const loading=$('chart-loading');
+  if(!canvas)return;
+  if(chartInst){chartInst.destroy();chartInst=null;}
+  if(loading)loading.style.display='none';
+
+  const up=data[data.length-1]?.close>=data[0]?.close;
+  const upColor='#ef4444'; // 台灣紅=漲
+  const dnColor='#22c55e'; // 台灣綠=跌
+
+  // 格式化為 OHLC 物件（x=timestamp）
+  const ohlcData=data.map(d=>({
+    x:new Date(d.date).getTime(),
+    o:d.open,h:d.high,l:d.low,c:d.close
+  }));
+
+  // 買入標記線
+  const myAvg=curHolding?curHolding.avg:null;
+
+  chartInst=new Chart(canvas,{
+    data:{
+      datasets:[
+        {
+          type:'candlestick',
+          label:'K線',
+          data:ohlcData,
+          color:{
+            up:upColor,
+            down:dnColor,
+            unchanged:'#94a3b8'
+          },
+          borderColor:{
+            up:upColor,
+            down:dnColor,
+            unchanged:'#94a3b8'
+          }
+        },
+        // 均成本參考線
+        ...(myAvg?[{
+          type:'line',
+          label:'均成本',
+          data:ohlcData.map(d=>({x:d.x,y:myAvg})),
+          borderColor:'rgba(251,191,36,0.7)',
+          borderWidth:1,
+          borderDash:[4,4],
+          pointRadius:0,
+          fill:false,
+        }]:[])
+      ]
+    },
+    options:{
+      responsive:true,
+      maintainAspectRatio:false,
+      animation:false,
+      interaction:{intersect:false,mode:'index'},
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          backgroundColor:'rgba(26,37,53,0.95)',
+          titleColor:'#94a3b8',
+          bodyColor:'#f0f4f8',
+          borderColor:'rgba(255,255,255,0.08)',
+          borderWidth:1,
+          callbacks:{
+            title:items=>{
+              const d=ohlcData[items[0].dataIndex];
+              return d?new Date(d.x).toLocaleDateString('zh-TW'):'';
+            },
+            label:item=>{
+              if(item.dataset.type==='line')return`均成本：$${myAvg?.toFixed(2)}`;
+              const d=ohlcData[item.dataIndex];
+              if(!d)return'';
+              return[`開：$${d.o?.toFixed(2)}  收：$${d.c?.toFixed(2)}`,`高：$${d.h?.toFixed(2)}  低：$${d.l?.toFixed(2)}`];
+            }
+          }
+        }
+      },
+      scales:{
+        x:{
+          type:'time',
+          time:{unit:'day',tooltipFormat:'yyyy/MM/dd',displayFormats:{day:'M/d'}},
+          grid:{color:'rgba(255,255,255,0.04)'},
+          ticks:{color:'#64748b',font:{size:10},maxTicksLimit:6},
+          border:{display:false}
+        },
+        y:{
+          position:'right',
+          grid:{color:'rgba(255,255,255,0.04)'},
+          ticks:{color:'#64748b',font:{size:10},callback:v=>'$'+v.toFixed(0)},
+          border:{display:false}
+        }
+      }
+    }
+  });
+}
+
+// ── 到價提醒 + PWA 通知 ──
+async function requestNotifPerm(){
+  if(!("Notification" in window))return false;
+  if(Notification.permission==='granted')return true;
+  if(Notification.permission==='denied')return false;
+  const perm=await Notification.requestPermission();
+  return perm==='granted';
+}
+
+async function saveAlert(){
+  const high=parseFloat($('d-alert-high').value)||null;
+  const low=parseFloat($('d-alert-low').value)||null;
+  if(!high&&!low){toast('請輸入目標高點或低點');return;}
+  try{
+    await dbPut('alerts',{symbol:curSym,high,low});
+  }catch(e){}
+  // 嘗試申請通知權限
+  const granted=await requestNotifPerm();
+  if(granted){
+    toast(`已設定 ${curSym} 到價提醒 · 通知已開啟`);
+  renderAlertList();
+  } else {
+    toast(`已設定提醒，但通知權限未開啟，下次開啟 App 時會以 Toast 顯示`);
+  }
+  renderAlertList();
+}
+
+async function checkAlerts(){
+  try{
+    const alerts=await dbAll('alerts');
+    for(const a of alerts){
+      if(!a.high&&!a.low)continue;
+      const p=P[a.symbol];if(!p)continue;
+      const msgs=[];
+      if(a.high&&p.price>=a.high)msgs.push(`${a.symbol} 收盤 $${p.price} 已達目標高點 $${a.high}`);
+      if(a.low&&p.price<=a.low)msgs.push(`${a.symbol} 收盤 $${p.price} 已跌破低點 $${a.low}`);
+      for(const msg of msgs){
+        // 優先用系統通知，降級用 toast
+        if(Notification.permission==='granted'){
+          new Notification('股票到價提醒',{body:msg,icon:'/icon-192.png'});
+        } else {
+          toast(msg);
+        }
+      }
+    }
+  }catch(e){}
+}
+
 // ── MODAL ──
 function showModal(title,body){$('modal-title').textContent=title;$('modal-body').innerHTML=body;$('modal-bg').classList.remove('hidden');}
 function closeModal(){$('modal-bg').classList.add('hidden');}
@@ -710,7 +978,35 @@ async function loadSettings(){
 async function saveSetting(k,v){await dbPut('settings',{key:k,value:v});S[k]=v;}
 function toggleIns(){S.ins=!S.ins;saveSetting('ins',S.ins);updateToggle();}
 function updateToggle(){const on=S.ins;$('tog').style.background=on?'var(--accent)':'var(--bg4)';$('tog-thumb').style.transform=on?'translateX(18px)':'translateX(0)';}
-async function renderSettings(){const t=await dbAll('trades');const c=await dbAll('cashflow');el('st-trades',t.length+' 筆');el('st-cf',c.length+' 筆');}
+async function renderSettings(){
+  const t=await dbAll('trades');const c=await dbAll('cashflow');
+  el('st-trades',t.length+' 筆');el('st-cf',c.length+' 筆');
+  await renderAlertList();
+}
+async function renderAlertList(){
+  const list=$('alert-list');if(!list)return;
+  try{
+    const alerts=await dbAll('alerts');
+    const active=alerts.filter(a=>a.high||a.low);
+    if(!active.length){list.innerHTML='<div class="empty" style="padding:20px">尚無設定提醒</div>';return;}
+    list.innerHTML=active.map(a=>`
+      <div class="cf-row">
+        <div>
+          <div style="font-size:14px;font-weight:500">${a.symbol} <span style="font-size:12px;font-weight:400;color:var(--text3)">${NAMES[a.symbol]||''}</span></div>
+          <div style="font-size:12px;color:var(--text3);margin-top:3px">
+            ${a.high?`<span style="color:var(--green);margin-right:10px">▲ 高點 $${a.high}</span>`:''}
+            ${a.low?`<span style="color:var(--red)">▼ 低點 $${a.low}</span>`:''}
+          </div>
+        </div>
+        <button onclick="clearAlert('${a.symbol}')" style="background:none;border:none;color:var(--text3);font-size:13px;padding:6px;cursor:pointer;">刪除</button>
+      </div>`).join('');
+  }catch(e){list.innerHTML='<div class="empty" style="padding:20px">無法讀取提醒</div>';}
+}
+async function clearAlert(sym){
+  try{await dbDel('alerts',sym);}catch(e){}
+  toast(`已刪除 ${sym} 提醒`);
+  renderAlertList();
+}
 
 // ── NAV ──
 let curTab='holdings';const hist=[];
