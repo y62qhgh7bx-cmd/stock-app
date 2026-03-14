@@ -341,23 +341,64 @@ async function fetchPrices(){
   if(!syms.length)return;
   $('refresh-btn').textContent='更新中…';
   $('price-status').innerHTML='<span class="spin"></span>報價更新中';
-  // 上市加 tse_, 上櫃加 otc_ — ETF 00xxx 多為上市，部分上櫃
-  const OTC_LIST=['00911','00919','00926','00930','00936','00939','006208'];
-  const q=syms.map(s=>OTC_LIST.includes(s)?`otc_${s}.tw`:`tse_${s}.tw`).join('|');
-  // 同時也查 otc 版本的 ETF 以防萬一
+  let n=0;
   try{
-    const r=await fetch(`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${q}&json=1&delay=0`,{signal:AbortSignal.timeout(10000)});
+    // 上市股票：TWSE 每日收盤資料（支援 CORS，不需要 Key）
+    const r=await fetch('https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json',{signal:AbortSignal.timeout(12000)});
     const d=await r.json();
-    let n=0;
-    if(d.msgArray){for(const item of d.msgArray){const p=parseFloat(item.z&&item.z!=='-'?item.z:item.y||0),y=parseFloat(item.y||0);if(p>0){const o={symbol:item.c,price:p,change:+(p-y).toFixed(2),pct:y?+((p-y)/y*100).toFixed(2):0,time:item.t||''};P[item.c]=o;await dbPut('prices',{...o,updated:Date.now()});n++;}}}
-    $('price-status').textContent=n>0?`已更新 ${n} 支 · ${new Date().toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'})}`:'非交易時間，顯示前次報價';
-  }catch(e){
-    const cached=await dbAll('prices');for(const p of cached)P[p.symbol]=p;
-    $('price-status').textContent='網路無法連線，顯示快取報價';
+    if(d.data){
+      // 欄位: [代號, 名稱, 成交股數, 成交金額, 開盤, 最高, 最低, 收盤, 漲跌(+/-), 漲跌價差, ...]
+      for(const row of d.data){
+        const sym=row[0].trim();
+        if(!syms.includes(sym))continue;
+        const close=parseFloat(row[7].replace(/,/g,''));
+        const sign=row[8].trim();
+        const diff=parseFloat(row[9].replace(/,/g,''))||0;
+        const change=sign==='-'?-diff:diff;
+        const prev=close-change;
+        const pct=prev?(change/prev*100):0;
+        if(close>0){
+          const o={symbol:sym,price:close,change:+change.toFixed(2),pct:+pct.toFixed(2),time:'收盤'};
+          P[sym]=o;await dbPut('prices',{...o,updated:Date.now()});n++;
+        }
+      }
+    }
+  }catch(e){/* 上市API失敗，繼續嘗試上櫃 */}
+  // 上櫃股票（OTC）
+  const missing=syms.filter(s=>!P[s]||P[s].time!=='收盤');
+  if(missing.length>0){
+    try{
+      const r2=await fetch('https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes?response=json',{signal:AbortSignal.timeout(10000)});
+      const d2=await r2.json();
+      const rows=d2.tables?.[0]?.data||d2.data||[];
+      for(const row of rows){
+        const sym=(row[0]||'').trim();
+        if(!missing.includes(sym))continue;
+        const close=parseFloat((row[7]||'').replace(/,/g,''));
+        const diffStr=(row[8]||'').replace(/,/g,'');
+        const diff=parseFloat(diffStr.replace('+',''))||0;
+        const change=diffStr.includes('-')?-Math.abs(diff):diff;
+        const prev=close-change;
+        const pct=prev?(change/prev*100):0;
+        if(close>0){
+          const o={symbol:sym,price:close,change:+change.toFixed(2),pct:+pct.toFixed(2),time:'收盤'};
+          P[sym]=o;await dbPut('prices',{...o,updated:Date.now()});n++;
+        }
+      }
+    }catch(e2){/* 上櫃API失敗 */}
+  }
+  if(n>0){
+    const today=new Date().toLocaleDateString('zh-TW',{month:'numeric',day:'numeric'});
+    $('price-status').textContent=`已更新 ${n} 支收盤價（${today}）`;
+  } else {
+    // 全部失敗，從快取讀
+    const cached=await dbAll('prices');
+    for(const p of cached)P[p.symbol]=p;
+    const k=Object.keys(P).length;
+    $('price-status').textContent=k>0?`使用快取收盤價（${k}支）`:'今日尚無收盤資料（假日或盤中）';
   }
   $('refresh-btn').textContent='更新報價 ↻';
   renderHoldings();
-  checkAlerts();
 }
 
 // ── RENDER HOLDINGS ──
