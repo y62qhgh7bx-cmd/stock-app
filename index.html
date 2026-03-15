@@ -306,8 +306,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
             <button class="rpill" style="padding:3px 10px;font-size:11px;" onclick="loadSparkline('6M')">6月</button>
           </div>
         </div>
-        <div style="position:relative;height:130px;" id="spark-wrap">
-          <canvas id="spark-canvas" style="width:100%;height:130px;"></canvas>
+        <div style="position:relative;height:220px;" id="spark-wrap">
+          <canvas id="spark-canvas" style="width:100%;height:220px;"></canvas>
           <div id="spark-status" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--text3);pointer-events:none;">載入中…</div>
           <div id="spark-tooltip" style="position:absolute;top:4px;left:50%;transform:translateX(-50%);font-size:12px;color:var(--text);background:rgba(26,37,53,0.92);border:.5px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 12px;pointer-events:none;display:none;white-space:nowrap;"></div>
         </div>
@@ -969,51 +969,80 @@ async function loadSparkline(period){
   }
 }
 
+function calcMA(closes, period){
+  return closes.map((_,i)=>{
+    if(i<period-1)return null;
+    const s=closes.slice(i-period+1,i+1).reduce((a,b)=>a+b,0);
+    return +(s/period).toFixed(2);
+  });
+}
+
+function calcKD(data, period=9){
+  // RSV → K(3日EMA) → D(3日EMA)
+  const K=[], D=[];
+  let k=50, d=50;
+  for(let i=0;i<data.length;i++){
+    if(i<period-1){ K.push(null); D.push(null); continue; }
+    const slice=data.slice(i-period+1,i+1);
+    const H=Math.max(...slice.map(x=>x.high||x.close));
+    const L=Math.min(...slice.map(x=>x.low||x.close));
+    const rsv=H===L?50:(data[i].close-L)/(H-L)*100;
+    k=k*2/3+rsv/3;
+    d=d*2/3+k/3;
+    K.push(+k.toFixed(2));
+    D.push(+d.toFixed(2));
+  }
+  return {K, D};
+}
+
 function drawSparkline(canvas){
   if(!sparkData.length)return;
   const dpr=window.devicePixelRatio||1;
   const wrap=canvas.parentElement;
   const W=wrap.clientWidth||300;
-  const H=130;
+  const H=220;
+  const CANDLE_H=150; // 蠟燭圖區高度
+  const KD_H=55;      // KD 區高度
+  const KD_TOP=CANDLE_H+8; // KD 區起始 Y
   canvas.width=W*dpr; canvas.height=H*dpr;
   canvas.style.width=W+'px'; canvas.style.height=H+'px';
   const ctx=canvas.getContext('2d');
   ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
 
-  const PAD={t:8,r:44,b:20,l:4};
+  const PAD={t:8,r:44,b:16,l:4};
   const pw=W-PAD.l-PAD.r;
-  const ph=H-PAD.t-PAD.b;
   const n=sparkData.length;
+  if(n<2)return;
 
-  // 價格範圍用高低價
+  const closes=sparkData.map(d=>d.close);
   const allH=sparkData.map(d=>d.high||d.close);
   const allL=sparkData.map(d=>d.low||d.close);
   const minV=Math.min(...allL);
   const maxV=Math.max(...allH);
   const range=maxV-minV||1;
+  const ph=CANDLE_H-PAD.t-16; // 蠟燭圖可用高度
   const yOf=v=>PAD.t+ph-(v-minV)/range*ph;
+  const gap=pw/(n-1);
+  const candleW=Math.max(2,Math.min(10,Math.floor(gap*0.7)));
 
-  // 每根蠟燭寬度（最少 2px，最多 12px）
-  const candleW=Math.max(2,Math.min(12,Math.floor(pw/n*0.7)));
-  const gap=pw/(n-1||1);
-
-  // Y 軸刻度（右側）
+  // ── Y 軸刻度（右側，蠟燭區）
   ctx.fillStyle='#64748b';
-  ctx.font=`${10*dpr>14?10:10}px -apple-system,sans-serif`;
+  ctx.font='9px -apple-system,sans-serif';
   ctx.textAlign='left';
   [minV,(minV+maxV)/2,maxV].forEach(v=>{
-    ctx.fillText('$'+v.toFixed(0), W-PAD.r+4, yOf(v)+3);
+    ctx.fillText('$'+v.toFixed(0), W-PAD.r+3, yOf(v)+3);
   });
 
-  // X 軸首尾日期
-  ctx.fillStyle='#64748b';
-  ctx.textAlign='left';
-  ctx.fillText(sparkData[0].date, PAD.l, H-4);
-  ctx.textAlign='right';
-  ctx.fillText(sparkData[n-1].date, W-PAD.r, H-4);
+  // ── 均線計算
+  const MA_CONFIGS=[
+    {period:5,  color:'#f59e0b', label:'MA5'},
+    {period:20, color:'#60a5fa', label:'MA20'},
+    {period:60, color:'#a78bfa', label:'MA60'},
+  ];
+  const maLines=MA_CONFIGS.map(cfg=>({...cfg, vals:calcMA(closes,cfg.period)}));
 
-  // 畫蠟燭
+  // ── 畫蠟燭
   sparkData.forEach((d,i)=>{
     const x=PAD.l+i*gap;
     const o=d.open||d.close;
@@ -1021,59 +1050,130 @@ function drawSparkline(canvas){
     const l=d.low||d.close;
     const cl=d.close;
     const up=cl>=o;
-    const color=up?'#ef4444':'#22c55e'; // 台灣：漲紅跌綠
-
+    const color=up?'#ef4444':'#22c55e';
     const bodyTop=yOf(Math.max(o,cl));
     const bodyBot=yOf(Math.min(o,cl));
     const bodyH=Math.max(1,bodyBot-bodyTop);
 
-    // 上下影線
+    // 影線
     ctx.beginPath();
-    ctx.strokeStyle=color;
-    ctx.lineWidth=1;
-    ctx.moveTo(x,yOf(h));
-    ctx.lineTo(x,bodyTop);
-    ctx.moveTo(x,bodyBot);
-    ctx.lineTo(x,yOf(l));
+    ctx.strokeStyle=color; ctx.lineWidth=1;
+    ctx.moveTo(x,yOf(h)); ctx.lineTo(x,bodyTop);
+    ctx.moveTo(x,bodyBot); ctx.lineTo(x,yOf(l));
     ctx.stroke();
 
     // 實體
-    ctx.fillStyle=color;
     if(candleW<=2){
-      // 太窄就只畫線
+      ctx.fillStyle=color;
       ctx.fillRect(x-0.5,bodyTop,1,bodyH);
+    } else if(up){
+      ctx.strokeStyle=color; ctx.lineWidth=1;
+      ctx.strokeRect(x-candleW/2+0.5,bodyTop+0.5,candleW-1,bodyH-1);
     } else {
-      const bx=x-candleW/2;
-      if(up){
-        // 陽線：空心（只畫邊框）
-        ctx.strokeStyle=color;
-        ctx.lineWidth=1;
-        ctx.strokeRect(bx+0.5,bodyTop+0.5,candleW-1,bodyH-1);
-      } else {
-        // 陰線：實心
-        ctx.fillRect(bx,bodyTop,candleW,bodyH);
-      }
+      ctx.fillStyle=color;
+      ctx.fillRect(x-candleW/2,bodyTop,candleW,bodyH);
     }
   });
 
-  // crosshair 高亮（hover 時由 bindSparkTooltip 呼叫傳入 idx）
+  // ── 均線
+  maLines.forEach(ma=>{
+    ctx.beginPath(); ctx.strokeStyle=ma.color; ctx.lineWidth=1.2; ctx.lineJoin='round';
+    let started=false;
+    ma.vals.forEach((v,i)=>{
+      if(v===null)return;
+      const x=PAD.l+i*gap;
+      if(!started){ctx.moveTo(x,yOf(v));started=true;}
+      else ctx.lineTo(x,yOf(v));
+    });
+    ctx.stroke();
+  });
+
+  // ── 均線圖例（右上角）
+  let lx=PAD.l;
+  const ly=PAD.t-1;
+  maLines.forEach(ma=>{
+    const hasData=ma.vals.some(v=>v!==null);
+    if(!hasData)return;
+    ctx.fillStyle=ma.color; ctx.font='9px -apple-system,sans-serif'; ctx.textAlign='left';
+    ctx.fillRect(lx,ly-5,10,2);
+    ctx.fillText(ma.label,lx+13,ly);
+    lx+=ma.label.length*6+20;
+  });
+
+  // ── 分隔線
+  ctx.beginPath();
+  ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=0.5;
+  ctx.moveTo(PAD.l,KD_TOP); ctx.lineTo(W-PAD.r,KD_TOP);
+  ctx.stroke();
+
+  // ── KD 計算
+  const {K,D}=calcKD(sparkData);
+  const kdYOf=v=>KD_TOP+(KD_H*(1-v/100));
+
+  // KD 背景線 20/50/80
+  [20,50,80].forEach(v=>{
+    ctx.beginPath();
+    ctx.strokeStyle='rgba(255,255,255,0.05)'; ctx.lineWidth=0.5;
+    ctx.setLineDash([3,3]);
+    ctx.moveTo(PAD.l,kdYOf(v)); ctx.lineTo(W-PAD.r,kdYOf(v));
+    ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle='#475569'; ctx.font='8px -apple-system,sans-serif';
+    ctx.textAlign='left';
+    ctx.fillText(v,W-PAD.r+3,kdYOf(v)+3);
+  });
+
+  // K 線（黃色）
+  ctx.beginPath(); ctx.strokeStyle='#f59e0b'; ctx.lineWidth=1; ctx.lineJoin='round';
+  let ks=false;
+  K.forEach((v,i)=>{
+    if(v===null)return;
+    const x=PAD.l+i*gap;
+    if(!ks){ctx.moveTo(x,kdYOf(v));ks=true;} else ctx.lineTo(x,kdYOf(v));
+  });
+  ctx.stroke();
+
+  // D 線（紫色）
+  ctx.beginPath(); ctx.strokeStyle='#a78bfa'; ctx.lineWidth=1; ctx.lineJoin='round';
+  let ds=false;
+  D.forEach((v,i)=>{
+    if(v===null)return;
+    const x=PAD.l+i*gap;
+    if(!ds){ctx.moveTo(x,kdYOf(v));ds=true;} else ctx.lineTo(x,kdYOf(v));
+  });
+  ctx.stroke();
+
+  // KD 圖例
+  ctx.fillStyle='#f59e0b'; ctx.font='9px -apple-system,sans-serif'; ctx.textAlign='left';
+  ctx.fillRect(PAD.l,KD_TOP+4,10,2);
+  ctx.fillText('K',PAD.l+13,KD_TOP+7);
+  ctx.fillStyle='#a78bfa';
+  ctx.fillRect(PAD.l+22,KD_TOP+4,10,2);
+  ctx.fillText('D',PAD.l+35,KD_TOP+7);
+
+  // X 軸日期（首尾，KD 下方）
+  ctx.fillStyle='#64748b'; ctx.font='9px -apple-system,sans-serif';
+  ctx.textAlign='left';
+  ctx.fillText(sparkData[0].date, PAD.l, H-2);
+  ctx.textAlign='right';
+  ctx.fillText(sparkData[n-1].date, W-PAD.r, H-2);
+
+  // ── Crosshair（hover）
   if(typeof drawSparkline._hoverIdx==='number'){
     const i=drawSparkline._hoverIdx;
     const x=PAD.l+i*gap;
     ctx.beginPath();
-    ctx.strokeStyle='rgba(255,255,255,0.2)';
-    ctx.lineWidth=1;
-    ctx.setLineDash([3,3]);
-    ctx.moveTo(x,PAD.t);
-    ctx.lineTo(x,H-PAD.b);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    // 高亮選中那根蠟燭的收盤點
-    const d=sparkData[i];
-    ctx.beginPath();
-    ctx.arc(x,yOf(d.close),3,0,Math.PI*2);
-    ctx.fillStyle='#fff';
-    ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=1; ctx.setLineDash([3,3]);
+    ctx.moveTo(x,PAD.t); ctx.lineTo(x,H-PAD.b);
+    ctx.stroke(); ctx.setLineDash([]);
+    const kv=K[i], dv=D[i];
+    if(kv!==null&&dv!==null){
+      ctx.beginPath(); ctx.arc(x,kdYOf(kv),2.5,0,Math.PI*2);
+      ctx.fillStyle='#f59e0b'; ctx.fill();
+      ctx.beginPath(); ctx.arc(x,kdYOf(dv),2.5,0,Math.PI*2);
+      ctx.fillStyle='#a78bfa'; ctx.fill();
+    }
+    ctx.beginPath(); ctx.arc(x,yOf(sparkData[i].close),3,0,Math.PI*2);
+    ctx.fillStyle='#fff'; ctx.fill();
   }
 }
 
@@ -1093,9 +1193,12 @@ function bindSparkTooltip(canvas){
     tip.style.display='block';
     const chg=d.close-(d.open||d.close);
     const chgPct=d.open?(chg/d.open*100):0;
-    const chgStr=(chg>=0?'+':'')+chg.toFixed(2)+'('+chgPct.toFixed(2)+'%)';
     const chgColor=chg>=0?'#ef4444':'#22c55e';
-    tip.innerHTML=`${d.date}&nbsp; 開<b>$${(d.open||d.close).toFixed(2)}</b>&nbsp; 高$${(d.high||d.close).toFixed(2)}&nbsp; 低$${(d.low||d.close).toFixed(2)}&nbsp; 收<b>$${d.close.toFixed(2)}</b>&nbsp; <span style="color:${chgColor}">${chgStr}</span>`;
+    const chgStr=`<span style="color:${chgColor}">${chg>=0?'+':''}${chg.toFixed(2)}(${chgPct.toFixed(2)}%)</span>`;
+    const {K,D}=calcKD(sparkData);
+    const kv=K[idx],dv=D[idx];
+    const kdStr=kv!==null?`&nbsp; <span style="color:#f59e0b">K${kv.toFixed(1)}</span>&nbsp;<span style="color:#a78bfa">D${dv.toFixed(1)}</span>`:'';
+    tip.innerHTML=`${d.date}&nbsp; 開<b>$${(d.open||d.close).toFixed(2)}</b>&nbsp; 高$${(d.high||d.close).toFixed(2)}&nbsp; 低$${(d.low||d.close).toFixed(2)}&nbsp; 收<b>$${d.close.toFixed(2)}</b>&nbsp; ${chgStr}${kdStr}`;
     drawSparkline._hoverIdx=idx;
     drawSparkline(canvas);
   };
