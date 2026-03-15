@@ -975,90 +975,139 @@ function drawSparkline(canvas){
   const wrap=canvas.parentElement;
   const W=wrap.clientWidth||300;
   const H=130;
-  canvas.width=W*dpr;canvas.height=H*dpr;
-  canvas.style.width=W+'px';canvas.style.height=H+'px';
+  canvas.width=W*dpr; canvas.height=H*dpr;
+  canvas.style.width=W+'px'; canvas.style.height=H+'px';
   const ctx=canvas.getContext('2d');
   ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
 
-  const closes=sparkData.map(d=>d.close);
-  const allPrices=sparkData.flatMap(d=>[d.high,d.low]);
-  const minV=Math.min(...allPrices),maxV=Math.max(...allPrices);
+  const PAD={t:8,r:44,b:20,l:4};
+  const pw=W-PAD.l-PAD.r;
+  const ph=H-PAD.t-PAD.b;
+  const n=sparkData.length;
+
+  // 價格範圍用高低價
+  const allH=sparkData.map(d=>d.high||d.close);
+  const allL=sparkData.map(d=>d.low||d.close);
+  const minV=Math.min(...allL);
+  const maxV=Math.max(...allH);
   const range=maxV-minV||1;
-  const PAD={t:8,r:48,b:20,l:8};
-  const pw=W-PAD.l-PAD.r,ph=H-PAD.t-PAD.b;
-  const xOf=i=>PAD.l+i/(sparkData.length-1||1)*pw;
   const yOf=v=>PAD.t+ph-(v-minV)/range*ph;
 
-  const up=closes[closes.length-1]>=closes[0];
-  const lineColor=up?'#ef4444':'#22c55e';
+  // 每根蠟燭寬度（最少 2px，最多 12px）
+  const candleW=Math.max(2,Math.min(12,Math.floor(pw/n*0.7)));
+  const gap=pw/(n-1||1);
 
-  // 填色區域
-  ctx.beginPath();
-  ctx.moveTo(xOf(0),yOf(closes[0]));
-  for(let i=1;i<sparkData.length;i++)ctx.lineTo(xOf(i),yOf(closes[i]));
-  ctx.lineTo(xOf(sparkData.length-1),H-PAD.b);
-  ctx.lineTo(xOf(0),H-PAD.b);
-  ctx.closePath();
-  ctx.fillStyle=up?'rgba(239,68,68,0.08)':'rgba(34,197,94,0.08)';
-  ctx.fill();
-
-  // 折線
-  ctx.beginPath();ctx.strokeStyle=lineColor;ctx.lineWidth=1.5;ctx.lineJoin='round';
-  ctx.moveTo(xOf(0),yOf(closes[0]));
-  for(let i=1;i<sparkData.length;i++)ctx.lineTo(xOf(i),yOf(closes[i]));
-  ctx.stroke();
-
-  // Y軸刻度（右側）
-  ctx.fillStyle='#64748b';ctx.font='10px -apple-system,sans-serif';ctx.textAlign='left';
+  // Y 軸刻度（右側）
+  ctx.fillStyle='#64748b';
+  ctx.font=`${10*dpr>14?10:10}px -apple-system,sans-serif`;
+  ctx.textAlign='left';
   [minV,(minV+maxV)/2,maxV].forEach(v=>{
-    ctx.fillText('$'+v.toFixed(0),W-PAD.r+4,yOf(v)+3);
+    ctx.fillText('$'+v.toFixed(0), W-PAD.r+4, yOf(v)+3);
   });
 
-  // X軸首尾日期
-  ctx.fillStyle='#64748b';ctx.textAlign='left';
-  ctx.fillText(sparkData[0].date,PAD.l,H-4);
+  // X 軸首尾日期
+  ctx.fillStyle='#64748b';
+  ctx.textAlign='left';
+  ctx.fillText(sparkData[0].date, PAD.l, H-4);
   ctx.textAlign='right';
-  ctx.fillText(sparkData[sparkData.length-1].date,W-PAD.r,H-4);
+  ctx.fillText(sparkData[n-1].date, W-PAD.r, H-4);
+
+  // 畫蠟燭
+  sparkData.forEach((d,i)=>{
+    const x=PAD.l+i*gap;
+    const o=d.open||d.close;
+    const h=d.high||d.close;
+    const l=d.low||d.close;
+    const cl=d.close;
+    const up=cl>=o;
+    const color=up?'#ef4444':'#22c55e'; // 台灣：漲紅跌綠
+
+    const bodyTop=yOf(Math.max(o,cl));
+    const bodyBot=yOf(Math.min(o,cl));
+    const bodyH=Math.max(1,bodyBot-bodyTop);
+
+    // 上下影線
+    ctx.beginPath();
+    ctx.strokeStyle=color;
+    ctx.lineWidth=1;
+    ctx.moveTo(x,yOf(h));
+    ctx.lineTo(x,bodyTop);
+    ctx.moveTo(x,bodyBot);
+    ctx.lineTo(x,yOf(l));
+    ctx.stroke();
+
+    // 實體
+    ctx.fillStyle=color;
+    if(candleW<=2){
+      // 太窄就只畫線
+      ctx.fillRect(x-0.5,bodyTop,1,bodyH);
+    } else {
+      const bx=x-candleW/2;
+      if(up){
+        // 陽線：空心（只畫邊框）
+        ctx.strokeStyle=color;
+        ctx.lineWidth=1;
+        ctx.strokeRect(bx+0.5,bodyTop+0.5,candleW-1,bodyH-1);
+      } else {
+        // 陰線：實心
+        ctx.fillRect(bx,bodyTop,candleW,bodyH);
+      }
+    }
+  });
+
+  // crosshair 高亮（hover 時由 bindSparkTooltip 呼叫傳入 idx）
+  if(typeof drawSparkline._hoverIdx==='number'){
+    const i=drawSparkline._hoverIdx;
+    const x=PAD.l+i*gap;
+    ctx.beginPath();
+    ctx.strokeStyle='rgba(255,255,255,0.2)';
+    ctx.lineWidth=1;
+    ctx.setLineDash([3,3]);
+    ctx.moveTo(x,PAD.t);
+    ctx.lineTo(x,H-PAD.b);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // 高亮選中那根蠟燭的收盤點
+    const d=sparkData[i];
+    ctx.beginPath();
+    ctx.arc(x,yOf(d.close),3,0,Math.PI*2);
+    ctx.fillStyle='#fff';
+    ctx.fill();
+  }
 }
 
 function bindSparkTooltip(canvas){
   const tip=$('spark-tooltip');if(!tip)return;
-  const draw=e=>{
+  const PAD={l:4,r:44};
+
+  const show=e=>{
     if(!sparkData.length){tip.style.display='none';return;}
     const rect=canvas.getBoundingClientRect();
     const clientX=e.touches?e.touches[0].clientX:e.clientX;
     const x=clientX-rect.left;
-    const PAD={l:8,r:48};
     const pw=rect.width-PAD.l-PAD.r;
     const idx=Math.max(0,Math.min(sparkData.length-1,Math.round((x-PAD.l)/pw*(sparkData.length-1))));
     const d=sparkData[idx];
     if(!d){tip.style.display='none';return;}
     tip.style.display='block';
-    tip.innerHTML=`${d.date}&nbsp; 收 <b>$${d.close?.toFixed(2)}</b>&nbsp; 高 $${d.high?.toFixed(2)}&nbsp; 低 $${d.low?.toFixed(2)}`;
-
-    // 重繪 + crosshair
+    const chg=d.close-(d.open||d.close);
+    const chgPct=d.open?(chg/d.open*100):0;
+    const chgStr=(chg>=0?'+':'')+chg.toFixed(2)+'('+chgPct.toFixed(2)+'%)';
+    const chgColor=chg>=0?'#ef4444':'#22c55e';
+    tip.innerHTML=`${d.date}&nbsp; 開<b>$${(d.open||d.close).toFixed(2)}</b>&nbsp; 高$${(d.high||d.close).toFixed(2)}&nbsp; 低$${(d.low||d.close).toFixed(2)}&nbsp; 收<b>$${d.close.toFixed(2)}</b>&nbsp; <span style="color:${chgColor}">${chgStr}</span>`;
+    drawSparkline._hoverIdx=idx;
     drawSparkline(canvas);
-    const dpr=window.devicePixelRatio||1;
-    const ctx=canvas.getContext('2d');
-    ctx.scale(dpr,dpr);
-    const closes=sparkData.map(d=>d.close);
-    const allPrices=sparkData.flatMap(d=>[d.high,d.low]);
-    const minV=Math.min(...allPrices),maxV=Math.max(...allPrices);
-    const range=maxV-minV||1;
-    const ph=rect.height-28;
-    const xPos=PAD.l+(idx/(sparkData.length-1||1))*(rect.width-PAD.l-PAD.r);
-    const yPos=8+ph-(d.close-minV)/range*ph;
-    ctx.beginPath();ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.lineWidth=1;ctx.setLineDash([3,3]);
-    ctx.moveTo(xPos,8);ctx.lineTo(xPos,rect.height-20);ctx.stroke();ctx.setLineDash([]);
-    ctx.beginPath();ctx.arc(xPos,yPos,3,0,Math.PI*2);
-    ctx.fillStyle='#fff';ctx.fill();
-    ctx.scale(1/dpr,1/dpr);
   };
-  canvas.addEventListener('mousemove',draw);
-  canvas.addEventListener('touchmove',draw,{passive:true});
-  canvas.addEventListener('mouseleave',()=>{tip.style.display='none';drawSparkline(canvas);});
-  canvas.addEventListener('touchend',()=>{tip.style.display='none';drawSparkline(canvas);});
+  const hide=()=>{
+    tip.style.display='none';
+    drawSparkline._hoverIdx=undefined;
+    drawSparkline(canvas);
+  };
+  canvas.addEventListener('mousemove',show);
+  canvas.addEventListener('touchmove',show,{passive:true});
+  canvas.addEventListener('mouseleave',hide);
+  canvas.addEventListener('touchend',hide);
 }
 
 // ══════════════════════════════════════
